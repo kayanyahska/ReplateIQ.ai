@@ -1,6 +1,6 @@
 
 import { GoogleGenAI, Type } from "@google/genai";
-import { CarbonAnalysis, Recipe, UserProfile, MealType, DishPrediction, CuisineType } from '../types';
+import { CarbonAnalysis, Recipe, UserProfile, MealType, DishPrediction, CuisineType, FoodVisionAnalysis, FoodListing, SmartMatchResult } from '../types';
 
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
@@ -113,7 +113,7 @@ export const analyzeCarbonFootprint = async (
   location: string
 ): Promise<CarbonAnalysis> => {
   const model = "gemini-2.5-flash";
-  
+
   const prompt = `
     You are an Environmental Scientist using EPA WARM and IPCC standards. 
     The user has excess food: ${quantity} servings of "${dishName}" in "${location}".
@@ -155,36 +155,36 @@ export const generateRecipeFromIngredients = async (
   cuisine: CuisineType,
   specificDishName?: string
 ): Promise<Recipe> => {
-    const model = "gemini-2.5-flash";
-    
-    // Construct ingredient string
-    const coreIngredientsStr = ingredients.join(", ");
-    const healthGoalsStr = profile.healthGoals.join(", ");
+  const model = "gemini-2.5-flash";
 
-    // Determine strict health constraints
-    let healthDirectives = "";
-    const lowerLipids = profile.healthGoals.some(g => g.includes("Triglycerides") || g.includes("Cholesterol") || g.includes("Heart"));
-    const lowCarb = profile.healthGoals.some(g => g.includes("Low Carb") || g.includes("Keto"));
-    const diabetic = profile.healthGoals.some(g => g.includes("Diabetic"));
+  // Construct ingredient string
+  const coreIngredientsStr = ingredients.join(", ");
+  const healthGoalsStr = profile.healthGoals.join(", ");
 
-    if (lowerLipids) {
-        healthDirectives += `
+  // Determine strict health constraints
+  let healthDirectives = "";
+  const lowerLipids = profile.healthGoals.some(g => g.includes("Triglycerides") || g.includes("Cholesterol") || g.includes("Heart"));
+  const lowCarb = profile.healthGoals.some(g => g.includes("Low Carb") || g.includes("Keto"));
+  const diabetic = profile.healthGoals.some(g => g.includes("Diabetic"));
+
+  if (lowerLipids) {
+    healthDirectives += `
         CRITICAL HEALTH OVERRIDE (Lower Triglycerides/Cholesterol):
         - ABSOLUTELY NO DEEP FRYING. (Do not suggest Fritters, Pakoras, Poori, or deep-fried snacks).
         - If ingredients suggest a fried item (e.g., Dal), you MUST pivot to a Steamed (e.g., Dhokla/Idli/Muthiya), Baked, or Soupy version (Dal Tadka with minimal oil).
         - Minimize saturated fats (Butter, Ghee, Heavy Cream, Cheese). Use healthy oils (Olive/Avocado) sparingly.
         - Prioritize high fiber.
         `;
-    }
-    if (lowCarb || diabetic) {
-        healthDirectives += `
+  }
+  if (lowCarb || diabetic) {
+    healthDirectives += `
         CRITICAL HEALTH OVERRIDE (Low Carb/Diabetic):
         - Minimize refined flours, sugars, and potatoes.
         - Focus on protein and fiber.
         `;
-    }
+  }
 
-    const prompt = `
+  const prompt = `
         Create a ${cuisine === 'Global' ? 'Creative' : cuisine} style ${mealType} recipe.
         
         AVAILABLE INGREDIENTS: ${coreIngredientsStr}
@@ -208,35 +208,35 @@ export const generateRecipeFromIngredients = async (
         Output JSON matching the schema.
     `;
 
-    try {
-        const response = await ai.models.generateContent({
-            model,
-            contents: prompt,
-            config: {
-                responseMimeType: "application/json",
-                responseSchema: recipeSchema,
-                temperature: 0.7
-            }
-        });
+  try {
+    const response = await ai.models.generateContent({
+      model,
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: recipeSchema,
+        temperature: 0.7
+      }
+    });
 
-        if (response.text) {
-             const recipe = JSON.parse(response.text) as Recipe;
-             recipe.createdAt = new Date().toISOString();
-             return recipe;
-        }
-        throw new Error("No recipe returned");
-    } catch (error) {
-        console.error("Gemini Recipe Error:", error);
-        throw new Error("Failed to generate recipe.");
+    if (response.text) {
+      const recipe = JSON.parse(response.text) as Recipe;
+      recipe.createdAt = new Date().toISOString();
+      return recipe;
     }
+    throw new Error("No recipe returned");
+  } catch (error) {
+    console.error("Gemini Recipe Error:", error);
+    throw new Error("Failed to generate recipe.");
+  }
 };
 
 export const analyzeDish = async (
-    dishName: string,
-    profile: UserProfile
+  dishName: string,
+  profile: UserProfile
 ): Promise<Recipe> => {
-    const model = "gemini-2.5-flash";
-    const prompt = `
+  const model = "gemini-2.5-flash";
+  const prompt = `
         Analyze the dish: "${dishName}".
         
         User Profile:
@@ -251,32 +251,32 @@ export const analyzeDish = async (
         5. Leave 'missingIngredients' and 'flexibleIngredients' empty as this is a theoretical analysis.
     `;
 
-    try {
-        const response = await ai.models.generateContent({
-            model,
-            contents: prompt,
-            config: {
-                responseMimeType: "application/json",
-                responseSchema: recipeSchema,
-                temperature: 0.7
-            }
-        });
+  try {
+    const response = await ai.models.generateContent({
+      model,
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: recipeSchema,
+        temperature: 0.7
+      }
+    });
 
-        if (response.text) {
-             const recipe = JSON.parse(response.text) as Recipe;
-             recipe.createdAt = new Date().toISOString();
-             return recipe;
-        }
-        throw new Error("No analysis returned");
-    } catch (error) {
-        console.error("Gemini Analysis Error:", error);
-        throw new Error("Failed to analyze dish.");
+    if (response.text) {
+      const recipe = JSON.parse(response.text) as Recipe;
+      recipe.createdAt = new Date().toISOString();
+      return recipe;
     }
+    throw new Error("No analysis returned");
+  } catch (error) {
+    console.error("Gemini Analysis Error:", error);
+    throw new Error("Failed to analyze dish.");
+  }
 };
 
 export const predictDishDetails = async (dishName: string): Promise<DishPrediction> => {
-    const model = "gemini-2.5-flash";
-    const prompt = `
+  const model = "gemini-2.5-flash";
+  const prompt = `
         Analyze the dish name: "${dishName}".
         Identify the likely core ingredients and standard calories per serving.
         
@@ -284,23 +284,119 @@ export const predictDishDetails = async (dishName: string): Promise<DishPredicti
         Provide "Refinements" which are questions/options to narrow down the specific recipe.
     `;
 
-    try {
-        const response = await ai.models.generateContent({
-            model,
-            contents: prompt,
-            config: {
-                responseMimeType: "application/json",
-                responseSchema: predictionSchema,
-                temperature: 0.3
-            }
-        });
+  try {
+    const response = await ai.models.generateContent({
+      model,
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: predictionSchema,
+        temperature: 0.3
+      }
+    });
 
-        if (response.text) {
-            return JSON.parse(response.text) as DishPrediction;
-        }
-        throw new Error("No prediction returned");
-    } catch (error) {
-        console.error("Gemini Prediction Error:", error);
-        throw new Error("Failed to predict dish details.");
+    if (response.text) {
+      return JSON.parse(response.text) as DishPrediction;
     }
+    throw new Error("No prediction returned");
+  } catch (error) {
+    console.error("Gemini Prediction Error:", error);
+    throw new Error("Failed to predict dish details.");
+  }
+};
+
+const visionSchema = {
+  type: Type.OBJECT,
+  properties: {
+    title: { type: Type.STRING },
+    quantity: { type: Type.STRING },
+    daysToExpiry: { type: Type.NUMBER },
+    calories: { type: Type.NUMBER },
+    category: { type: Type.STRING },
+  },
+  required: ['title', 'quantity', 'daysToExpiry', 'calories', 'category'],
+};
+
+export const analyzeFoodImage = async (base64Image: string): Promise<FoodVisionAnalysis> => {
+  const model = "gemini-1.5-flash";
+
+  try {
+    const response = await ai.models.generateContent({
+      model,
+      contents: [
+        { text: "Identify this food item. Estimate quantity, likely expiration date (in days), and calories per serving. Suggest a title." },
+        { inlineData: { mimeType: "image/jpeg", data: base64Image } }
+      ],
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: visionSchema,
+        temperature: 0.4
+      }
+    });
+
+    if (response.text) {
+      return JSON.parse(response.text) as FoodVisionAnalysis;
+    }
+    throw new Error("No vision data returned");
+  } catch (error) {
+    console.error("Gemini Vision Error:", error);
+    throw new Error("Failed to analyze food image.");
+  }
+};
+
+const matchSchema = {
+  type: Type.ARRAY,
+  items: {
+    type: Type.OBJECT,
+    properties: {
+      listingId: { type: Type.STRING },
+      matchScore: { type: Type.NUMBER },
+      reason: { type: Type.STRING },
+    },
+    required: ['listingId', 'matchScore', 'reason'],
+  }
+};
+
+export const findSmartMatches = async (listings: FoodListing[], profile: UserProfile): Promise<SmartMatchResult[]> => {
+  const model = "gemini-2.5-flash"; // Or 2.0-flash-thinking-exp for reasoning
+
+  // Filter out own listings or non-available ones first to save tokens
+  const candidates = listings.map(l => ({ id: l.id, title: l.title, desc: l.tags.join(", ") }));
+
+  const prompt = `
+    User Profile:
+    - Dietary Restrictions: ${profile.restrictions.join(", ")}
+    - Health Goals: ${profile.healthGoals.join(", ")}
+
+    Available Food Listings:
+    ${JSON.stringify(candidates)}
+
+    Task:
+    Rank these listings based on compatibility for the User.
+    - MatchScore: 0-100.
+    - Reason: Short explanation.
+    - RESTRICTIONS ARE STRICT. If user is 'Vegan' and item is 'Steak', score MUST be 0.
+    
+    Output JSON Array.
+  `;
+
+  try {
+    const response = await ai.models.generateContent({
+      model,
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: matchSchema,
+        temperature: 0.2
+      }
+    });
+
+    if (response.text) {
+      return JSON.parse(response.text) as SmartMatchResult[];
+    }
+    return [];
+  } catch (error) {
+    console.error("Gemini Matching Error:", error);
+    return []; // Fail silent for recommendations
+  }
 };

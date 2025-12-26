@@ -1,0 +1,43 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    
+    // --- Helper Functions ---
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isImage() {
+      return request.resource.contentType.matches('image/.*');
+    }
+    
+    function isUnderMaxSize() {
+      return request.resource.size < 2 * 1024 * 1024; // 2MB Limit
+    }
+
+    // --- RULES ---
+    
+    // LISTINGS: Public Read, Auth Create (with limits)
+    match /listings/{userId}/{fileName} {
+      allow read: if true;
+      allow write: if isAuthenticated() 
+                   && request.auth.uid == userId
+                   && isImage()
+                   && isUnderMaxSize();
+    }
+    
+    // PROFILES: Public Read, Auth Write
+    match /users/{userId}/{fileName} {
+      allow read: if true;
+      allow write: if isAuthenticated() 
+                   && request.auth.uid == userId
+                   && isImage()
+                   && isUnderMaxSize();
+    }
+    
+    // DEFAULT: Deny all else
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

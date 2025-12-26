@@ -1,6 +1,7 @@
 import { initializeApp } from "firebase/app";
 import { getAuth } from "firebase/auth";
-import { getFirestore } from "firebase/firestore";
+import { getFirestore, initializeFirestore } from "firebase/firestore";
+import { getStorage } from "firebase/storage";
 
 // --- PRODUCTION CONFIGURATION ---
 // To make this app production ready:
@@ -12,28 +13,30 @@ import { getFirestore } from "firebase/firestore";
 // 6. Set USE_FIREBASE = true
 
 const firebaseConfig = {
-  apiKey: "",
-  authDomain: "",
-  projectId: "",
-  storageBucket: "",
-  messagingSenderId: "",
-  appId: "",
-  measurementId: ""
+    apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+    authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+    projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+    storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+    messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+    appId: import.meta.env.VITE_FIREBASE_APP_ID,
+    measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID
 };
 
 // Toggle this to TRUE if you have added your valid config above
-export const USE_FIREBASE = true; 
+export const USE_FIREBASE = true;
 
-let app, auth, db;
+let app, auth, db, storage;
 
 if (USE_FIREBASE) {
     try {
         app = initializeApp(firebaseConfig);
         auth = getAuth(app);
-        db = getFirestore(app);
+        // FORCE LONG POLLING: Fixes "transport errored" / QUIC / Firewall issues
+        db = initializeFirestore(app, { experimentalForceLongPolling: true });
+        storage = getStorage(app);
     } catch (e) {
         console.error("Firebase Initialization Error:", e);
     }
 }
 
-export { auth, db };
+export { auth, db, storage, app };

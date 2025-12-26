@@ -13,10 +13,12 @@ export type CuisineType = "Global" | "Indian" | "Thai" | "Asian" | "Chinese" | "
 export type TransportMode = 'walk' | 'bike' | 'transit' | 'car';
 
 // KYOTO / INTERNATIONAL STANDARDS - SIMPLIFIED FOR CLOSED LOOP
-export type CarbonStandard = 'ReplateIQ Verified' | 'Gold Standard' | 'VCS'; 
+export type CarbonStandard = 'ReplateIQ Verified' | 'Gold Standard' | 'VCS';
 
 export enum ProjectCategory {
-  AvoidedEmissions = "Avoided Food Waste Emissions"
+  AvoidedEmissions = "Avoided Food Waste Emissions",
+  Reforestation = "Reforestation & Afforestation",
+  RenewableEnergy = "Renewable Energy Installation"
 }
 
 export interface CarbonProject {
@@ -40,53 +42,54 @@ export interface PointTransaction {
   type: 'earned' | 'redeemed' | 'sold' | 'bought' | 'retired' | 'listed';
   verificationHash?: string; // Ledger Hash
   standard?: CarbonStandard;
-  vintage?: number; 
+  vintage?: number;
   serialNumber?: string;
 }
 
 export interface TradeOffer {
-    id: string;
-    enterpriseId: string;
-    enterpriseName: string;
-    targetUserId: string; // The user receiving the offer
-    region: string; // For context
-    amount: number; // Credits requested
-    pricePerCredit: number; // The Bid
-    status: 'pending' | 'accepted' | 'rejected' | 'expired';
-    createdAt: string;
+  id: string;
+  enterpriseId: string;
+  enterpriseName: string;
+  targetUserId: string; // The user receiving the offer
+  targetUserName?: string; // [NEW] Denormalized name for UI
+  region: string; // For context
+  amount: number; // Credits requested
+  pricePerCredit: number; // The Bid
+  status: 'pending' | 'accepted' | 'rejected' | 'expired';
+  createdAt: string;
 }
 
 export interface B2BListing {
-    id: string;
-    sellerId: string;
-    sellerName: string;
-    sellerVerified: boolean;
-    amount: number;
-    pricePerCredit: number;
-    project: CarbonProject; // Always ReplateIQ Community Project
-    vintage: number;
-    serialNumberRange: string;
-    status: 'active' | 'sold' | 'retired';
-    createdAt: string;
+  id: string;
+  sellerId: string;
+  sellerName: string;
+  sellerVerified: boolean;
+  amount: number;
+  pricePerCredit: number;
+  project: CarbonProject; // Always ReplateIQ Community Project
+  vintage: number;
+  serialNumberRange: string;
+  status: 'active' | 'sold' | 'retired';
+  createdAt: string;
 }
 
 export interface RetirementCertificate {
-    id: string;
-    beneficiary: string;
-    amount: number;
-    project: string;
-    vintage: number;
-    serialNumber: string;
-    date: string;
-    hash: string;
+  id: string;
+  beneficiary: string;
+  amount: number;
+  project: string;
+  vintage: number;
+  serialNumber: string;
+  date: string;
+  hash: string;
 }
 
 export interface User {
   id: string;
-  role?: 'user' | 'enterprise'; 
-  walletId?: string; 
+  role?: 'user' | 'enterprise';
+  walletId?: string;
   email: string;
-  password?: string; 
+  password?: string;
   name: string;
   location: string;
   avatar?: string;
@@ -96,6 +99,18 @@ export interface User {
   rating: number;
   ratingCount: number;
   kycVerified?: boolean; // Regulatory Requirement
+
+  // SUBSCRIPTION & LIMITS
+  isLifetimeMember: boolean; // $5 Entry Fee paid?
+  subscriptionTier: SubscriptionTier;
+  aiScanCount: number;
+  lastAiResetDate: string; // ISO Date to track daily resets
+}
+
+export enum SubscriptionTier {
+  FREE = 'free', // Eco-Seed
+  PRO = 'pro',   // Eco-Sprout ($11.99)
+  BUSINESS = 'business' // Eco-Harvest ($19.99)
 }
 
 export interface UserProfile {
@@ -129,8 +144,8 @@ export interface Recipe {
   recipeName: string;
   description: string;
   ingredients: string[];
-  missingIngredients?: string[]; 
-  flexibleIngredients?: string[]; 
+  missingIngredients?: string[];
+  flexibleIngredients?: string[];
   instructions: string[];
   nutrition: {
     standard: NutritionMetrics;
@@ -138,7 +153,7 @@ export interface Recipe {
   };
   healthTips: string[];
   healthySwaps: HealthySwap[];
-  alternativeDishes: AlternativeDish[]; 
+  alternativeDishes: AlternativeDish[];
   matchScore?: number;
 }
 
@@ -164,7 +179,7 @@ export interface FoodListing {
   id: string;
   title: string;
   quantity: number;
-  ingredients?: string[]; 
+  ingredients?: string[];
   caloriesPerServing?: number;
   image?: string;
   giverId: string;
@@ -173,7 +188,7 @@ export interface FoodListing {
   location: string;
   distance: string;
   tags: string[];
-  status: 'available' | 'claimed' | 'completed';
+  status: 'available' | 'claimed' | 'completed' | 'deleted';
   claimCode?: string;
   claimedBy?: string;
   claimedByName?: string;
@@ -186,6 +201,8 @@ export interface ChatMessage {
   id: string;
   listingId: string;
   senderId: string;
+  senderName?: string; // [NEW] To avoid lookup failures
+  receiverId: string;
   text: string;
   timestamp: string;
 }
@@ -194,8 +211,22 @@ export interface DishPrediction {
   ingredients: string[];
   calories: number;
   refinements: {
-    category: string; 
-    targetIngredient: string; 
-    options: string[]; 
+    category: string;
+    targetIngredient: string;
+    options: string[];
   }[];
+}
+
+export interface FoodVisionAnalysis {
+  title: string;
+  quantity: string;
+  daysToExpiry: number;
+  calories: number;
+  category: string;
+}
+
+export interface SmartMatchResult {
+  listingId: string;
+  matchScore: number;
+  reason: string;
 }

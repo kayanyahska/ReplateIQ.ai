@@ -1,29 +1,31 @@
 
 import { User, FoodListing, ChatMessage, PointTransaction, B2BListing, CarbonStandard, CarbonProject, ProjectCategory, TradeOffer } from "../types";
-import { auth as firebaseAuth, db as firebaseFirestore, USE_FIREBASE } from "./firebaseConfig";
-import { 
-    signInWithEmailAndPassword, 
-    createUserWithEmailAndPassword, 
-    signOut, 
+import { auth as firebaseAuth, db as firebaseFirestore, app as firebaseApp, USE_FIREBASE } from "./firebaseConfig";
+import {
+    signInWithEmailAndPassword,
+    createUserWithEmailAndPassword,
+    signOut,
     updateProfile,
     onAuthStateChanged
 } from "firebase/auth";
-import { 
-    collection, 
-    addDoc, 
-    query, 
-    where, 
-    onSnapshot, 
-    doc, 
-    setDoc, 
-    getDoc, 
-    updateDoc, 
+import {
+    collection,
+    addDoc,
+    query,
+    where,
+    onSnapshot,
+    doc,
+    setDoc,
+    getDoc,
+    updateDoc,
     orderBy,
     deleteDoc,
     getDocs,
     writeBatch,
-    runTransaction
+    runTransaction,
+    limit
 } from "firebase/firestore";
+import { getFunctions, httpsCallable } from "firebase/functions";
 
 // --- REPLATEIQ COMMUNITY PROJECT ---
 const COMMUNITY_PROJECT: CarbonProject = {
@@ -47,7 +49,7 @@ interface IDB {
     logout(): Promise<void>;
     updateUser(id: string, data: Partial<User>): Promise<void>;
     addPoints(userId: string, amount: number, description: string): Promise<void>;
-    
+
     // HANDSHAKE PROTOCOL
     broadcastOffer(enterpriseId: string, enterpriseName: string, region: string, price: number): Promise<void>;
     updateOfferPrice(offerId: string, newPrice: number): Promise<void>;
@@ -55,7 +57,7 @@ interface IDB {
     rejectTradeOffer(offerId: string): Promise<void>;
     subscribeToUserOffers(userId: string, callback: (offers: TradeOffer[]) => void): () => void;
     subscribeToEnterpriseBids(enterpriseId: string, callback: (offers: TradeOffer[]) => void): () => void;
-    
+
     // B2B Market
     getCommunityProject(): CarbonProject;
     createB2BListing(listing: B2BListing): Promise<void>;
@@ -70,11 +72,13 @@ interface IDB {
     updateListing(id: string, data: Partial<FoodListing>): Promise<void>;
     deleteListing(id: string): Promise<void>;
     sendMessage(msg: ChatMessage): Promise<void>;
-    getAllUsers(): Promise<User[]>; 
-    getCurrentUser(): User | null; 
-    
+    getAllUsers(): Promise<User[]>;
+    getCurrentUser(): User | null;
+
     // Legacy
     transferCredits(userId: string, region: string, amount: number): Promise<void>;
+    unclaimListing(id: string): Promise<void>;
+    verifyTransaction(listingId: string, code: string): Promise<boolean>;
 }
 
 // --- HELPER ---
@@ -83,7 +87,7 @@ const sanitizeData = (data: any) => {
     const clean = (obj: any): any => {
         if (obj === null || typeof obj !== 'object') return obj;
         if (obj instanceof Date) return obj;
-        if (seen.has(obj)) return null; 
+        if (seen.has(obj)) return null;
         seen.add(obj);
         if (Array.isArray(obj)) return obj.map(clean);
         const res: any = {};
@@ -99,13 +103,13 @@ const sanitizeData = (data: any) => {
 };
 
 const generateWalletId = () => `NC-${Math.floor(1000 + Math.random() * 9000)}-${Math.floor(1000 + Math.random() * 9000)}`;
-const generateHash = () => Array.from({length: 64}, () => Math.floor(Math.random() * 16).toString(16)).join('');
+const generateHash = () => Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join('');
 const generateSerialNumber = (standard: string, country: string, vintage: number, amount: number) => {
     const batch = Math.floor(Math.random() * 10000);
     const start = Math.floor(Math.random() * 1000000);
     const end = start + amount;
-    const stdCode = standard.includes('ReplateIQ') ? 'RIQ' : standard.substring(0,3).toUpperCase();
-    return `${stdCode}-${country.substring(0,2).toUpperCase()}-${vintage}-${batch}-${start}-${end}`;
+    const stdCode = standard.includes('ReplateIQ') ? 'RIQ' : standard.substring(0, 3).toUpperCase();
+    return `${stdCode}-${country.substring(0, 2).toUpperCase()}-${vintage}-${batch}-${start}-${end}`;
 };
 
 // --- LOCAL DB ---
@@ -118,14 +122,14 @@ class LocalDB implements IDB {
     private sessionKey = 'replateiq_session_v1';
 
     private getUsers(): User[] { return JSON.parse(localStorage.getItem(this.usersKey) || '[]'); }
-    private saveUsers(users: User[]) { 
-        localStorage.setItem(this.usersKey, JSON.stringify(users)); 
-        window.dispatchEvent(new Event('local-db-users-change')); 
+    private saveUsers(users: User[]) {
+        localStorage.setItem(this.usersKey, JSON.stringify(users));
+        window.dispatchEvent(new Event('local-db-users-change'));
     }
     private getOffers(): TradeOffer[] { return JSON.parse(localStorage.getItem(this.offersKey) || '[]'); }
-    private saveOffers(offers: TradeOffer[]) { 
-        localStorage.setItem(this.offersKey, JSON.stringify(offers)); 
-        window.dispatchEvent(new Event('local-db-offers-change')); 
+    private saveOffers(offers: TradeOffer[]) {
+        localStorage.setItem(this.offersKey, JSON.stringify(offers));
+        window.dispatchEvent(new Event('local-db-offers-change'));
     }
     private getListings(): FoodListing[] { return JSON.parse(localStorage.getItem(this.listingsKey) || '[]'); }
     private saveListings(listings: FoodListing[]) { localStorage.setItem(this.listingsKey, JSON.stringify(listings)); window.dispatchEvent(new Event('local-db-listings-change')); }
@@ -151,7 +155,7 @@ class LocalDB implements IDB {
             }
         };
         window.addEventListener('local-db-users-change', userUpdateHandler);
-        
+
         const storageHandler = (e: StorageEvent) => { if (e.key === this.sessionKey) handler(); };
         window.addEventListener('storage', storageHandler);
         return () => {
@@ -220,12 +224,12 @@ class LocalDB implements IDB {
 
     async broadcastOffer(enterpriseId: string, enterpriseName: string, region: string, price: number): Promise<void> {
         const users = this.getUsers();
-        const sellers = users.filter(u => 
-            (u.role === 'user' || !u.role) && u.walletBalance > 0 && 
+        const sellers = users.filter(u =>
+            (u.role === 'user' || !u.role) && u.walletBalance > 0 &&
             (region === 'General Pool' || u.location.toLowerCase().includes(region.toLowerCase()))
         );
         const newOffers: TradeOffer[] = sellers.map(seller => ({
-            id: 'offer-' + Date.now().toString() + '-' + Math.random().toString(36).substr(2,9),
+            id: 'offer-' + Date.now().toString() + '-' + Math.random().toString(36).substr(2, 9),
             enterpriseId,
             enterpriseName,
             targetUserId: seller.id,
@@ -281,10 +285,10 @@ class LocalDB implements IDB {
         offer.status = 'accepted';
         this.saveUsers(users);
         this.saveOffers(offers);
-        
+
         if (this.getCurrentUser()?.id === userId) {
-             localStorage.setItem(this.sessionKey, JSON.stringify(users[userIdx]));
-             window.dispatchEvent(new Event('local-session-change'));
+            localStorage.setItem(this.sessionKey, JSON.stringify(users[userIdx]));
+            window.dispatchEvent(new Event('local-session-change'));
         }
     }
 
@@ -342,10 +346,10 @@ class LocalDB implements IDB {
         const users = this.getUsers();
         const buyerIdx = users.findIndex(u => u.id === buyerId);
         if (buyerIdx === -1) throw new Error("User error");
-        
+
         const hash = generateHash();
         const subSerial = generateSerialNumber(listing.project.standard, listing.project.country, listing.vintage, amount);
-        
+
         if (retire) {
             users[buyerIdx].retiredBalance = (users[buyerIdx].retiredBalance || 0) + amount;
             users[buyerIdx].pointsHistory.unshift({ id: Date.now().toString(), date: new Date().toISOString(), amount: amount, description: `OFFSET RETIRED: ${listing.project.name}`, type: 'retired', verificationHash: hash, standard: listing.project.standard, vintage: listing.vintage, serialNumber: subSerial });
@@ -362,21 +366,63 @@ class LocalDB implements IDB {
     subscribeToB2BListings(cb: (l: B2BListing[]) => void) { cb(this.getB2BListings()); const handler = () => cb(this.getB2BListings()); window.addEventListener('local-db-b2b-change', handler); return () => window.removeEventListener('local-db-b2b-change', handler); }
     subscribeToListings(cb: (l: FoodListing[]) => void) { cb(this.getListings()); const handler = () => cb(this.getListings()); window.addEventListener('local-db-listings-change', handler); return () => window.removeEventListener('local-db-listings-change', handler); }
     subscribeToMessages(cb: (m: ChatMessage[]) => void) { cb(this.getChats()); const handler = () => cb(this.getChats()); window.addEventListener('local-db-chats-change', handler); return () => window.removeEventListener('local-db-chats-change', handler); }
-    subscribeToUsers(cb: (users: User[]) => void) { cb(this.getUsers()); const handler = () => cb(this.getUsers()); window.addEventListener('local-db-users-change', handler); window.addEventListener('storage', (e) => { if(e.key === this.usersKey) handler(); }); return () => { window.removeEventListener('local-db-users-change', handler); }; }
-    
+    subscribeToUsers(cb: (users: User[]) => void) { cb(this.getUsers()); const handler = () => cb(this.getUsers()); window.addEventListener('local-db-users-change', handler); window.addEventListener('storage', (e) => { if (e.key === this.usersKey) handler(); }); return () => { window.removeEventListener('local-db-users-change', handler); }; }
+
     async addListing(l: FoodListing) { this.saveListings([l, ...this.getListings()]); }
-    async updateListing(id: string, data: Partial<FoodListing>) { const l = this.getListings(); const idx = l.findIndex(x => x.id === id); if(idx !== -1) { l[idx] = {...l[idx], ...data}; this.saveListings(l); } }
-    async deleteListing(id: string) { this.saveListings(this.getListings().filter(l => l.id !== id)); }
+    async updateListing(id: string, data: Partial<FoodListing>) { const l = this.getListings(); const idx = l.findIndex(x => x.id === id); if (idx !== -1) { l[idx] = { ...l[idx], ...data }; this.saveListings(l); } }
+    async deleteListing(id: string) { const l = this.getListings(); const idx = l.findIndex(x => x.id === id); if (idx !== -1) { l[idx].status = 'deleted'; this.saveListings(l); } }
     async sendMessage(m: ChatMessage) { this.saveChats([...this.getChats(), m]); }
     async getAllUsers() { return this.getUsers(); }
-    async transferCredits(userId: string, region: string, amount: number) {}
+    async transferCredits(userId: string, region: string, amount: number) { }
+    async unclaimListing(id: string) {
+        const l = this.getListings();
+        const idx = l.findIndex(x => x.id === id);
+        if (idx !== -1) {
+            l[idx] = { ...l[idx], status: 'available', claimedBy: undefined, claimedByName: undefined, claimCode: undefined, pickupMethod: undefined };
+            this.saveListings(l);
+        }
+    }
+    async verifyTransaction(listingId: string, code: string): Promise<boolean> {
+        const l = this.getListings();
+        const idx = l.findIndex(x => x.id === listingId);
+        if (idx === -1) throw new Error("Listing not found");
+        const listing = l[idx];
+
+        if (listing.claimCode !== code) throw new Error("Invalid Code");
+        if (listing.status !== 'claimed') throw new Error("Not claimed");
+
+        // Mock Server Logic in Local Mode
+        const points = Math.round((listing.carbonSaved || 0) * 10) + 5;
+        const splitPoints = Math.floor(points / 2);
+
+        const users = this.getUsers();
+        const giverIdx = users.findIndex(u => u.id === listing.giverId);
+        const receiverIdx = users.findIndex(u => u.id === listing.claimedBy);
+
+        const hash = generateHash();
+        const pd = new Date().toISOString();
+
+        if (giverIdx !== -1) {
+            users[giverIdx].walletBalance += splitPoints;
+            users[giverIdx].pointsHistory.unshift({ id: Date.now().toString(), date: pd, amount: splitPoints, description: `Food Rescued (Local)`, type: 'earned', verificationHash: hash });
+        }
+        if (receiverIdx !== -1) {
+            users[receiverIdx].walletBalance += splitPoints;
+            users[receiverIdx].pointsHistory.unshift({ id: (Date.now() + 1).toString(), date: pd, amount: splitPoints, description: `Verified Pickup (Local)`, type: 'earned', verificationHash: hash });
+        }
+
+        l[idx].status = 'completed';
+        this.saveListings(l);
+        this.saveUsers(users);
+        return true;
+    }
 }
 
 // --- FIREBASE DB ---
 class FirebaseDB implements IDB {
     onAuthStateChanged(callback: (user: User | null) => void): () => void {
-        if (!firebaseAuth) return () => {};
-        
+        if (!firebaseAuth) return () => { };
+
         let unsubscribeSnapshot: (() => void) | null = null;
 
         const unsubscribeAuth = onAuthStateChanged(firebaseAuth, async (fbUser) => {
@@ -386,19 +432,19 @@ class FirebaseDB implements IDB {
                 unsubscribeSnapshot = null;
             }
 
-            if(fbUser) {
+            if (fbUser) {
                 const docRef = doc(firebaseFirestore, "users", fbUser.uid);
                 // 2. Set up new listener
-                unsubscribeSnapshot = onSnapshot(docRef, 
-                    (s) => { 
-                        if(s.exists()) {
-                            callback({id: fbUser.uid, ...s.data()} as User); 
+                unsubscribeSnapshot = onSnapshot(docRef,
+                    (s) => {
+                        if (s.exists()) {
+                            callback({ id: fbUser.uid, ...s.data() } as User);
                         }
                     },
                     (error) => {
                         // 3. Robust Error Handling for Logout Race Conditions
                         if (error.code !== 'permission-denied') {
-                             console.error("Auth profile sync error:", error);
+                            console.error("Auth profile sync error:", error);
                         } else {
                             // If permission denied (likely logout happened), trigger null callback safely
                             callback(null);
@@ -417,17 +463,17 @@ class FirebaseDB implements IDB {
         };
     }
 
-    async login(email: string, password?: string) { if(firebaseAuth) await signInWithEmailAndPassword(firebaseAuth, email, password || "123456"); }
-    async signup(user: User) { 
-        if(!firebaseAuth) return;
+    async login(email: string, password?: string) { if (firebaseAuth) await signInWithEmailAndPassword(firebaseAuth, email, password || "123456"); }
+    async signup(user: User) {
+        if (!firebaseAuth) return;
         const cred = await createUserWithEmailAndPassword(firebaseAuth, user.email, user.password || "123456");
         await updateProfile(cred.user, { displayName: user.name });
         const { password, ...safe } = user;
         await setDoc(doc(firebaseFirestore, "users", cred.user.uid), { ...safe, walletId: generateWalletId(), id: cred.user.uid });
     }
-    async logout() { if(firebaseAuth) await signOut(firebaseAuth); }
+    async logout() { if (firebaseAuth) await signOut(firebaseAuth); }
     getCurrentUser() { return null; }
-    async updateUser(id: string, data: Partial<User>) { if(firebaseFirestore) await updateDoc(doc(firebaseFirestore, "users", id), sanitizeData(data)); }
+    async updateUser(id: string, data: Partial<User>) { if (firebaseFirestore) await updateDoc(doc(firebaseFirestore, "users", id), sanitizeData(data)); }
     async addPoints(userId: string, amount: number, description: string) {
         if (!firebaseFirestore) return;
         const userRef = doc(firebaseFirestore, "users", userId);
@@ -439,50 +485,78 @@ class FirebaseDB implements IDB {
         });
     }
     async broadcastOffer(enterpriseId: string, enterpriseName: string, region: string, price: number) {
-        if(!firebaseFirestore) return;
+        if (!firebaseFirestore) return;
+
+        // 1. Get Existing Offers for this Enterpise to prevent duplicates (Idempotency)
+        const existingOffersSnapshot = await getDocs(query(
+            collection(firebaseFirestore, "trade_offers"),
+            where("enterpriseId", "==", enterpriseId),
+            where("status", "==", "pending")
+        ));
+        const existingOffersMap = new Map(); // userId -> offerId
+        existingOffersSnapshot.forEach(doc => {
+            const data = doc.data() as TradeOffer;
+            existingOffersMap.set(data.targetUserId, doc.id);
+        });
+
         const batch = writeBatch(firebaseFirestore);
         const usersSnap = await getDocs(collection(firebaseFirestore, "users"));
         let count = 0;
+
         usersSnap.forEach(u => {
             const userData = u.data() as User;
-            const isUser = userData.role === 'user' || !userData.role; 
+            const isUser = userData.role === 'user' || !userData.role;
             const matchesRegion = region === 'General Pool' || (userData.location && userData.location.toLowerCase().includes(region.toLowerCase()));
-            
-            if(isUser && (userData.walletBalance || 0) > 0 && matchesRegion && count < 490) {
-               const ref = doc(collection(firebaseFirestore, "trade_offers"));
-               batch.set(ref, { 
-                   id: ref.id, 
-                   enterpriseId, 
-                   enterpriseName, 
-                   targetUserId: u.id, 
-                   region, 
-                   amount: userData.walletBalance, 
-                   pricePerCredit: price, 
-                   status: 'pending', 
-                   createdAt: new Date().toISOString() 
-               });
-               count++;
+
+            if (isUser && (userData.walletBalance || 0) > 0 && matchesRegion && count < 490) {
+                // Check if we already have an offer for this user
+                if (existingOffersMap.has(u.id)) {
+                    // UPDATE existing offer
+                    const offerId = existingOffersMap.get(u.id);
+                    const ref = doc(firebaseFirestore, "trade_offers", offerId);
+                    batch.update(ref, {
+                        pricePerCredit: price,
+                        amount: userData.walletBalance, // Update amount in case user balance changed
+                        region: region // Update region label if changed
+                    });
+                } else {
+                    // CREATE new offer
+                    const ref = doc(collection(firebaseFirestore, "trade_offers"));
+                    batch.set(ref, {
+                        id: ref.id,
+                        enterpriseId,
+                        enterpriseName,
+                        targetUserId: u.id,
+                        targetUserName: userData.name, // [NEW] Store name
+                        region,
+                        amount: userData.walletBalance,
+                        pricePerCredit: price,
+                        status: 'pending',
+                        createdAt: new Date().toISOString()
+                    });
+                }
+                count++;
             }
         });
-        if(count > 0) await batch.commit();
+        if (count > 0) await batch.commit();
     }
     async updateOfferPrice(offerId: string, newPrice: number) {
-        if(firebaseFirestore) await updateDoc(doc(firebaseFirestore, "trade_offers", offerId), { pricePerCredit: newPrice });
+        if (firebaseFirestore) await updateDoc(doc(firebaseFirestore, "trade_offers", offerId), { pricePerCredit: newPrice });
     }
     async acceptTradeOffer(offerId: string, userId: string) {
-        if(!firebaseFirestore) return;
+        if (!firebaseFirestore) return;
         await runTransaction(firebaseFirestore, async (t) => {
             const offerRef = doc(firebaseFirestore, "trade_offers", offerId);
             const offerSnap = await t.get(offerRef);
             if (!offerSnap.exists()) throw "Offer not found";
             const offer = offerSnap.data() as TradeOffer;
             if (offer.status !== 'pending') throw "Offer processed";
-            
+
             const userRef = doc(firebaseFirestore, "users", userId);
             const entRef = doc(firebaseFirestore, "users", offer.enterpriseId);
             const userSnap = await t.get(userRef);
             const entSnap = await t.get(entRef);
-            
+
             const userData = userSnap.data() as User;
             if (userData.walletBalance < offer.amount) { t.update(offerRef, { status: 'rejected' }); throw "Insufficient balance"; }
             const hash = generateHash();
@@ -492,12 +566,12 @@ class FirebaseDB implements IDB {
         });
     }
     async rejectTradeOffer(offerId: string) {
-        if(firebaseFirestore) await updateDoc(doc(firebaseFirestore, "trade_offers", offerId), { status: 'rejected' });
+        if (firebaseFirestore) await updateDoc(doc(firebaseFirestore, "trade_offers", offerId), { status: 'rejected' });
     }
     subscribeToUserOffers(userId: string, cb: (offers: TradeOffer[]) => void) {
-        if(!firebaseFirestore) return () => {};
+        if (!firebaseFirestore) return () => { };
         return onSnapshot(
-            query(collection(firebaseFirestore, "trade_offers"), where("targetUserId", "==", userId)), 
+            query(collection(firebaseFirestore, "trade_offers"), where("targetUserId", "==", userId)),
             (s) => {
                 const offers = s.docs.map(d => d.data() as TradeOffer).filter(o => o.status === 'pending');
                 cb(offers);
@@ -506,9 +580,9 @@ class FirebaseDB implements IDB {
         );
     }
     subscribeToEnterpriseBids(enterpriseId: string, cb: (offers: TradeOffer[]) => void) {
-        if(!firebaseFirestore) return () => {};
+        if (!firebaseFirestore) return () => { };
         return onSnapshot(
-            query(collection(firebaseFirestore, "trade_offers"), where("enterpriseId", "==", enterpriseId)), 
+            query(collection(firebaseFirestore, "trade_offers"), where("enterpriseId", "==", enterpriseId)),
             (s) => {
                 const offers = s.docs.map(d => d.data() as TradeOffer).filter(o => o.status === 'pending');
                 cb(offers);
@@ -518,7 +592,7 @@ class FirebaseDB implements IDB {
     }
     getCommunityProject() { return COMMUNITY_PROJECT; }
     async createB2BListing(listing: B2BListing) {
-        if(!firebaseFirestore) return;
+        if (!firebaseFirestore) return;
         const sellerRef = doc(firebaseFirestore, "users", listing.sellerId);
         await runTransaction(firebaseFirestore, async (t) => {
             const sellerSnap = await t.get(sellerRef);
@@ -530,7 +604,7 @@ class FirebaseDB implements IDB {
         });
     }
     async buyB2BListing(buyerId: string, listingId: string, amount: number, retire: boolean) {
-        if(!firebaseFirestore) return;
+        if (!firebaseFirestore) return;
         await runTransaction(firebaseFirestore, async (t) => {
             const listingRef = doc(firebaseFirestore, "b2b_listings", listingId);
             const buyerRef = doc(firebaseFirestore, "users", buyerId);
@@ -547,16 +621,31 @@ class FirebaseDB implements IDB {
             if (list.amount - amount <= 0) t.update(listingRef, { amount: 0, status: 'sold' }); else t.update(listingRef, { amount: list.amount - amount });
         });
     }
-    subscribeToB2BListings(cb: (l: B2BListing[]) => void) { if(!firebaseFirestore) return () => {}; return onSnapshot(collection(firebaseFirestore, "b2b_listings"), (s) => cb(s.docs.map(d => ({id:d.id, ...d.data()} as B2BListing))), (error) => console.warn("B2B listings subscribe error", error.code)); }
-    subscribeToListings(cb: (l: FoodListing[]) => void) { if(!firebaseFirestore) return () => {}; return onSnapshot(query(collection(firebaseFirestore, "listings"), orderBy("createdAt", "desc")), (s) => cb(s.docs.map(d => ({id:d.id, ...d.data()} as FoodListing))), (error) => console.warn("Listings subscribe error", error.code)); }
-    subscribeToMessages(cb: (m: ChatMessage[]) => void) { if(!firebaseFirestore) return () => {}; return onSnapshot(query(collection(firebaseFirestore, "messages"), orderBy("timestamp", "asc")), (s) => cb(s.docs.map(d => ({id:d.id, ...d.data()} as ChatMessage))), (error) => console.warn("Messages subscribe error", error.code)); }
-    subscribeToUsers(cb: (users: User[]) => void) { if(!firebaseFirestore) return () => {}; return onSnapshot(collection(firebaseFirestore, "users"), (s) => cb(s.docs.map(d => ({id:d.id, ...d.data()} as User))), (error) => console.warn("Users subscribe error", error.code)); }
-    async addListing(l: FoodListing) { if(firebaseFirestore) { const {id, ...d}=l; await addDoc(collection(firebaseFirestore, "listings"), sanitizeData(d)); } }
-    async updateListing(id: string, d: Partial<FoodListing>) { if(firebaseFirestore) await updateDoc(doc(firebaseFirestore, "listings", id), sanitizeData(d)); }
-    async deleteListing(id: string) { if(firebaseFirestore) await deleteDoc(doc(firebaseFirestore, "listings", id)); }
-    async sendMessage(m: ChatMessage) { if(firebaseFirestore) { const {id, ...d}=m; await addDoc(collection(firebaseFirestore, "messages"), sanitizeData(d)); } }
-    async getAllUsers() { if(!firebaseFirestore) return []; const s = await getDocs(collection(firebaseFirestore, "users")); return s.docs.map(d => ({id:d.id, ...d.data()} as User)); }
-    async transferCredits(userId: string, region: string, amount: number) {}
+    subscribeToB2BListings(cb: (l: B2BListing[]) => void) { if (!firebaseFirestore) return () => { }; return onSnapshot(query(collection(firebaseFirestore, "b2b_listings"), limit(50)), (s) => cb(s.docs.map(d => ({ id: d.id, ...d.data() } as B2BListing))), (error) => console.warn("B2B listings subscribe error", error.code)); }
+    subscribeToListings(cb: (l: FoodListing[]) => void) { if (!firebaseFirestore) return () => { }; return onSnapshot(query(collection(firebaseFirestore, "listings"), orderBy("createdAt", "desc"), limit(100)), (s) => cb(s.docs.map(d => ({ id: d.id, ...d.data() } as FoodListing))), (error) => console.warn("Listings subscribe error", error.code)); }
+    subscribeToMessages(cb: (m: ChatMessage[]) => void) { if (!firebaseFirestore) return () => { }; return onSnapshot(query(collection(firebaseFirestore, "messages"), orderBy("timestamp", "desc"), limit(200)), (s) => cb(s.docs.map(d => ({ id: d.id, ...d.data() } as ChatMessage)).reverse()), (error) => console.warn("Messages subscribe error", error.code)); }
+    subscribeToUsers(cb: (users: User[]) => void) { if (!firebaseFirestore) return () => { }; return onSnapshot(query(collection(firebaseFirestore, "users"), limit(100)), (s) => cb(s.docs.map(d => ({ id: d.id, ...d.data() } as User))), (error) => console.warn("Users subscribe error", error.code)); }
+    async addListing(l: FoodListing) { if (firebaseFirestore) { const { id, ...d } = l; await addDoc(collection(firebaseFirestore, "listings"), sanitizeData(d)); } }
+    async updateListing(id: string, d: Partial<FoodListing>) { if (firebaseFirestore) await updateDoc(doc(firebaseFirestore, "listings", id), sanitizeData(d)); }
+    async deleteListing(id: string) { if (firebaseFirestore) await updateDoc(doc(firebaseFirestore, "listings", id), { status: 'deleted' }); }
+    async sendMessage(m: ChatMessage) { if (firebaseFirestore) { const { id, ...d } = m; await addDoc(collection(firebaseFirestore, "messages"), sanitizeData(d)); } }
+    async getAllUsers() { if (!firebaseFirestore) return []; const s = await getDocs(query(collection(firebaseFirestore, "users"), limit(100))); return s.docs.map(d => ({ id: d.id, ...d.data() } as User)); }
+    async transferCredits(userId: string, region: string, amount: number) { }
+    async unclaimListing(id: string) {
+        if (firebaseFirestore) await updateDoc(doc(firebaseFirestore, "listings", id), { status: 'available', claimedBy: null, claimedByName: null, claimCode: null, pickupMethod: null });
+    }
+    async verifyTransaction(listingId: string, code: string): Promise<boolean> {
+        if (!process.env.VITE_FIREBASE_API_KEY && !USE_FIREBASE) return false; // Safety
+        try {
+            const functions = getFunctions(firebaseApp);
+            const verifyFn = httpsCallable(functions, 'verifyTransaction');
+            await verifyFn({ listingId, code });
+            return true;
+        } catch (e) {
+            console.error("Secure Verification Failed", e);
+            throw e;
+        }
+    }
 }
 
 export const db = USE_FIREBASE ? new FirebaseDB() : new LocalDB();
